@@ -91,7 +91,7 @@ func (c *Consumer) Connect() error {
 func (c *Consumer) StartConsuming(ctx context.Context) error {
 	msgs, err := c.channel.Consume(
 		c.config.QueueName, // queue
-		"consumer1",        // consumer
+		"consumer3",        // consumer tag
 		false,              // auto-ack
 		false,              // exclusive
 		false,              // no-local
@@ -124,21 +124,18 @@ func (c *Consumer) StartConsuming(ctx context.Context) error {
 
 // handleMessage processes a single message
 func (c *Consumer) handleMessage(msg amqp.Delivery) {
-	defer msg.Ack(false)
+	defer msg.Ack(false) // Acknowledge the message only after processing
 	log.Printf("Received message: %s", string(msg.Body))
+	// Add message processing logic here
 }
 
 // Close gracefully shuts down the consumer
 func (c *Consumer) Close() {
-	if c.channel != nil {
-		if err := c.channel.Close(); err != nil {
-			log.Printf("Failed to close channel: %v", err)
-		}
+	if err := c.channel.Close(); err != nil {
+		log.Printf("Failed to close channel: %v", err)
 	}
-	if c.conn != nil {
-		if err := c.conn.Close(); err != nil {
-			log.Printf("Failed to close connection: %v", err)
-		}
+	if err := c.conn.Close(); err != nil {
+		log.Printf("Failed to close connection: %v", err)
 	}
 }
 
@@ -170,11 +167,12 @@ func main() {
 	log.Printf("Received signal: %v. Initiating shutdown...", sig)
 
 	cancel()
-	consumer.wg.Wait()
-	consumer.Close()
+	consumer.wg.Wait() // Wait for the consumer goroutine to finish
+	consumer.Close()   // Close the consumer gracefully
 	log.Println("Consumer shut down gracefully")
 }
 
+// getEnv fetches an environment variable or returns a default value if not set
 func getEnv(key, defaultVal string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value

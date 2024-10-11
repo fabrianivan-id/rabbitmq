@@ -91,7 +91,7 @@ func (c *Consumer) Connect() error {
 func (c *Consumer) StartConsuming(ctx context.Context) error {
 	msgs, err := c.channel.Consume(
 		c.config.QueueName, // queue
-		"consumer1",        // consumer
+		"consumer2",        // consumer
 		false,              // auto-ack
 		false,              // exclusive
 		false,              // no-local
