@@ -90,11 +90,12 @@ func (p *Producer) Publish(message string) error {
 func (p *Producer) Start(ctx context.Context) {
 	defer p.wg.Done()
 	ticker := time.NewTicker(p.config.PublishFrequency)
-	defer ticker.Stop()
+	// defer ticker.Stop()
 
-	messageCount := 1
+	// messageCount := 1
 
-	for {
+	for messageCount := 1; messageCount <= 10; messageCount++ {
+		//for {
 		select {
 		case <-ctx.Done():
 			log.Printf("Producer %d: Received shutdown signal", p.id)
@@ -107,9 +108,10 @@ func (p *Producer) Start(ctx context.Context) {
 			} else {
 				log.Printf("Producer %d: Published message: %s", p.id, message)
 			}
-			messageCount++
+			//messageCount++
 		}
 	}
+	ticker.Stop()
 }
 
 // Close gracefully shuts down the producer
@@ -132,7 +134,7 @@ func main() {
 		ExchangeName:     getEnv("EXCHANGE_NAME", "exchange_key"),
 		RoutingKey:       getEnv("ROUTING_KEY", "my.routing.key"),
 		NumProducers:     getEnvAsInt("NUM_PRODUCERS", 1),
-		PublishFrequency: getEnvAsDuration("PUBLISH_FREQUENCY", 20*time.Millisecond),
+		PublishFrequency: getEnvAsDuration("PUBLISH_FREQUENCY", 333*time.Millisecond),
 	}
 
 	var wg sync.WaitGroup
