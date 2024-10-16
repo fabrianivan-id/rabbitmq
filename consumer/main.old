@@ -1,11 +1,13 @@
+// consumer.go
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"sync"
+	"strconv"
 	"syscall"
 
 	"github.com/streadway/amqp"
@@ -21,15 +23,15 @@ type Configuration struct {
 
 // Consumer represents a RabbitMQ consumer
 type Consumer struct {
+	id      int
 	config  Configuration
 	conn    *amqp.Connection
 	channel *amqp.Channel
-	wg      sync.WaitGroup
 }
 
 // NewConsumer creates a new Consumer instance
-func NewConsumer(config Configuration) *Consumer {
-	return &Consumer{config: config}
+func NewConsumer(id int, config Configuration) *Consumer {
+	return &Consumer{id: id, config: config}
 }
 
 // Connect establishes a connection and channel to RabbitMQ
@@ -45,7 +47,7 @@ func (c *Consumer) Connect() error {
 		return err
 	}
 
-	// Declare the exchange
+	// Declare the exchange (idempotent)
 	err = c.channel.ExchangeDeclare(
 		c.config.ExchangeName, // name
 		"direct",              // type
@@ -59,14 +61,15 @@ func (c *Consumer) Connect() error {
 		return err
 	}
 
-	// Declare the queue
+	// Declare the specific queue for this consumer
+	queueName := fmt.Sprintf("%s_%d", c.config.QueueName, c.id)
 	_, err = c.channel.QueueDeclare(
-		c.config.QueueName, // name
-		true,               // durable
-		false,              // delete when unused
-		false,              // exclusive
-		false,              // no-wait
-		nil,                // arguments
+		queueName, // name
+		true,      // durable
+		false,     // delete when unused
+		false,     // exclusive
+		false,     // no-wait
+		nil,       // arguments
 	)
 	if err != nil {
 		return err
@@ -74,7 +77,7 @@ func (c *Consumer) Connect() error {
 
 	// Bind the queue to the exchange with the routing key
 	err = c.channel.QueueBind(
-		c.config.QueueName,    // queue name
+		queueName,             // queue name
 		c.config.RoutingKey,   // routing key
 		c.config.ExchangeName, // exchange
 		false,                 // no-wait
@@ -89,9 +92,10 @@ func (c *Consumer) Connect() error {
 
 // StartConsuming begins consuming messages from the queue
 func (c *Consumer) StartConsuming(ctx context.Context) error {
+	queueName := fmt.Sprintf("%s_%d", c.config.QueueName, c.id)
 	msgs, err := c.channel.Consume(
-		c.config.QueueName, // queue
-		"consumer3",        // consumer tag
+		queueName,          // queue
+		strconv.Itoa(c.id), // consumer (unique ID for each consumer)
 		false,              // auto-ack
 		false,              // exclusive
 		false,              // no-local
@@ -102,19 +106,17 @@ func (c *Consumer) StartConsuming(ctx context.Context) error {
 		return err
 	}
 
-	c.wg.Add(1)
 	go func() {
-		defer c.wg.Done()
 		for {
 			select {
 			case msg, ok := <-msgs:
 				if !ok {
-					log.Println("Message channel closed")
+					log.Printf("Consumer %d: Message channel closed", c.id)
 					return
 				}
 				c.handleMessage(msg)
 			case <-ctx.Done():
-				log.Println("Context canceled, stopping consumer")
+				log.Printf("Consumer %d: Context canceled, stopping consumer", c.id)
 				return
 			}
 		}
@@ -124,19 +126,35 @@ func (c *Consumer) StartConsuming(ctx context.Context) error {
 
 // handleMessage processes a single message
 func (c *Consumer) handleMessage(msg amqp.Delivery) {
-	defer msg.Ack(false) // Acknowledge the message only after processing
-	log.Printf("Received message: %s", string(msg.Body))
-	// Add message processing logic here
+	defer msg.Ack(false)
+	log.Printf("Consumer %d: Received message: %s", c.id, string(msg.Body))
 }
 
 // Close gracefully shuts down the consumer
 func (c *Consumer) Close() {
-	if err := c.channel.Close(); err != nil {
-		log.Printf("Failed to close channel: %v", err)
+	if c.channel != nil {
+		if err := c.channel.Close(); err != nil {
+			log.Printf("Consumer %d: Failed to close channel: %v", c.id, err)
+		}
 	}
-	if err := c.conn.Close(); err != nil {
-		log.Printf("Failed to close connection: %v", err)
+	if c.conn != nil {
+		if err := c.conn.Close(); err != nil {
+			log.Printf("Consumer %d: Failed to close connection: %v", c.id, err)
+		}
 	}
+}
+
+// Function to create and start a consumer
+func createAndStartConsumer(id int, config Configuration, ctx context.Context) *Consumer {
+	consumer := NewConsumer(id, config)
+	if err := consumer.Connect(); err != nil {
+		log.Fatalf("Consumer %d: Failed to connect to RabbitMQ: %v", id, err)
+	}
+	if err := consumer.StartConsuming(ctx); err != nil {
+		log.Fatalf("Consumer %d: Failed to start consuming: %v", id, err)
+	}
+	log.Printf("Consumer %d started.", id)
+	return consumer
 }
 
 func main() {
@@ -147,32 +165,37 @@ func main() {
 		RoutingKey:   getEnv("ROUTING_KEY", "my.routing.key"),
 	}
 
-	consumer := NewConsumer(config)
-
-	if err := consumer.Connect(); err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := consumer.StartConsuming(ctx); err != nil {
-		log.Fatalf("Failed to start consuming: %v", err)
-	}
+	// Create and start consumers without iteration
+	consumer1 := createAndStartConsumer(1, config, ctx)
+	consumer2 := createAndStartConsumer(2, config, ctx)
+	consumer3 := createAndStartConsumer(3, config, ctx)
+	consumer4 := createAndStartConsumer(4, config, ctx)
+	consumer5 := createAndStartConsumer(5, config, ctx)
+	consumer6 := createAndStartConsumer(6, config, ctx) // Added Consumer 6
+	consumer7 := createAndStartConsumer(7, config, ctx) // Added Consumer 7
 
-	sig := <-sigs
-	log.Printf("Received signal: %v. Initiating shutdown...", sig)
+	// Wait for interrupt signal to gracefully shut down
+	<-sigs
+	log.Println("Received signal to stop. Shutting down...")
 
-	cancel()
-	consumer.wg.Wait() // Wait for the consumer goroutine to finish
-	consumer.Close()   // Close the consumer gracefully
-	log.Println("Consumer shut down gracefully")
+	// Close each consumer connection gracefully
+	consumer1.Close()
+	consumer2.Close()
+	consumer3.Close()
+	consumer4.Close()
+	consumer5.Close()
+	consumer6.Close()
+	consumer7.Close()
+
+	log.Println("All consumers have shut down gracefully")
 }
 
-// getEnv fetches an environment variable or returns a default value if not set
 func getEnv(key, defaultVal string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value

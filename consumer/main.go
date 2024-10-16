@@ -1,183 +1,101 @@
+// consumer.go
 package main
 
 import (
-	"context"
+	"fmt"
 	"log"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 
 	"github.com/streadway/amqp"
 )
 
-// Configuration holds the RabbitMQ configuration parameters
-type Configuration struct {
-	RabbitMQURL  string
-	ExchangeName string
-	QueueName    string
-	RoutingKey   string
-}
-
-// Consumer represents a RabbitMQ consumer
-type Consumer struct {
-	config  Configuration
-	conn    *amqp.Connection
-	channel *amqp.Channel
-	wg      sync.WaitGroup
-}
-
-// NewConsumer creates a new Consumer instance
-func NewConsumer(config Configuration) *Consumer {
-	return &Consumer{config: config}
-}
-
-// Connect establishes a connection and channel to RabbitMQ
-func (c *Consumer) Connect() error {
-	var err error
-	c.conn, err = amqp.Dial(c.config.RabbitMQURL)
+func failOnError(err error, msg string) {
 	if err != nil {
-		return err
+		log.Fatalf("%s: %s", msg, err)
 	}
+}
 
-	c.channel, err = c.conn.Channel()
-	if err != nil {
-		return err
-	}
+func startConsumer(id int, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-	// Declare the exchange
-	err = c.channel.ExchangeDeclare(
-		c.config.ExchangeName, // name
-		"direct",              // type
-		true,                  // durable
-		false,                 // auto-deleted
-		false,                 // internal
-		false,                 // no-wait
-		nil,                   // arguments
+	// Koneksi ke RabbitMQ
+	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	failOnError(err, fmt.Sprintf("Consumer %d: Failed to connect to RabbitMQ", id))
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+	failOnError(err, fmt.Sprintf("Consumer %d: Failed to open a channel", id))
+	defer ch.Close()
+
+	// Deklarasikan exchange bertipe 'fanout'
+	err = ch.ExchangeDeclare(
+		"broadcast", // nama exchange
+		"fanout",    // tipe
+		true,        // durable
+		false,       // auto-deleted
+		false,       // internal
+		false,       // no-wait
+		nil,         // arguments
 	)
-	if err != nil {
-		return err
-	}
+	failOnError(err, fmt.Sprintf("Consumer %d: Failed to declare an exchange", id))
 
-	// Declare the queue
-	_, err = c.channel.QueueDeclare(
-		c.config.QueueName, // name
-		true,               // durable
-		false,              // delete when unused
-		false,              // exclusive
-		false,              // no-wait
-		nil,                // arguments
+	// Deklarasikan queue unik untuk setiap consumer
+	queueName := fmt.Sprintf("consumer_queue_%d", id)
+	q, err := ch.QueueDeclare(
+		queueName, // nama queue
+		true,      // durable
+		false,     // delete when unused
+		false,     // exclusive
+		false,     // no-wait
+		nil,       // arguments
 	)
-	if err != nil {
-		return err
-	}
+	failOnError(err, fmt.Sprintf("Consumer %d: Failed to declare a queue", id))
 
-	// Bind the queue to the exchange with the routing key
-	err = c.channel.QueueBind(
-		c.config.QueueName,    // queue name
-		c.config.RoutingKey,   // routing key
-		c.config.ExchangeName, // exchange
-		false,                 // no-wait
-		nil,                   // arguments
+	// Bind queue ke exchange
+	err = ch.QueueBind(
+		q.Name,      // nama queue
+		"",          // routing key
+		"broadcast", // nama exchange
+		false,
+		nil,
 	)
-	if err != nil {
-		return err
-	}
+	failOnError(err, fmt.Sprintf("Consumer %d: Failed to bind a queue", id))
 
-	return nil
-}
-
-// StartConsuming begins consuming messages from the queue
-func (c *Consumer) StartConsuming(ctx context.Context) error {
-	msgs, err := c.channel.Consume(
-		c.config.QueueName, // queue
-		"consumer1",        // consumer
-		false,              // auto-ack
-		false,              // exclusive
-		false,              // no-local
-		false,              // no-wait
-		nil,                // args
+	// Konsumsi pesan
+	msgs, err := ch.Consume(
+		q.Name, // nama queue
+		"",     // consumer
+		true,   // auto-ack
+		false,  // exclusive
+		false,  // no-local
+		false,  // no-wait
+		nil,    // args
 	)
-	if err != nil {
-		return err
-	}
+	failOnError(err, fmt.Sprintf("Consumer %d: Failed to register a consumer", id))
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for {
-			select {
-			case msg, ok := <-msgs:
-				if !ok {
-					log.Println("Message channel closed")
-					return
-				}
-				c.handleMessage(msg)
-			case <-ctx.Done():
-				log.Println("Context canceled, stopping consumer")
-				return
-			}
-		}
-	}()
-	return nil
-}
+	log.Printf("Consumer %d: Waiting for messages. To exit press CTRL+C", id)
 
-// handleMessage processes a single message
-func (c *Consumer) handleMessage(msg amqp.Delivery) {
-	defer msg.Ack(false)
-	log.Printf("Received message: %s", string(msg.Body))
-}
-
-// Close gracefully shuts down the consumer
-func (c *Consumer) Close() {
-	if c.channel != nil {
-		if err := c.channel.Close(); err != nil {
-			log.Printf("Failed to close channel: %v", err)
-		}
-	}
-	if c.conn != nil {
-		if err := c.conn.Close(); err != nil {
-			log.Printf("Failed to close connection: %v", err)
-		}
+	for d := range msgs {
+		log.Printf("Consumer %d: Received a message: %s", id, d.Body)
 	}
 }
 
 func main() {
-	config := Configuration{
-		RabbitMQURL:  getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
-		ExchangeName: getEnv("EXCHANGE_NAME", "exchange_key"),
-		QueueName:    getEnv("QUEUE_NAME", "queue_group_1"),
-		RoutingKey:   getEnv("ROUTING_KEY", "my.routing.key"),
-	}
+	var wg sync.WaitGroup
 
-	consumer := NewConsumer(config)
+	// Daftar consumer yang akan dijalankan
 
-	if err := consumer.Connect(); err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
-	}
+	wg.Add(1)
+	go startConsumer(1, &wg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	wg.Add(1)
+	go startConsumer(2, &wg)
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	wg.Add(1)
+	go startConsumer(3, &wg)
 
-	if err := consumer.StartConsuming(ctx); err != nil {
-		log.Fatalf("Failed to start consuming: %v", err)
-	}
+	wg.Add(1)
+	go startConsumer(4, &wg)
 
-	sig := <-sigs
-	log.Printf("Received signal: %v. Initiating shutdown...", sig)
-
-	cancel()
-	consumer.wg.Wait()
-	consumer.Close()
-	log.Println("Consumer shut down gracefully")
-}
-
-func getEnv(key, defaultVal string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultVal
+	wg.Wait()
 }
