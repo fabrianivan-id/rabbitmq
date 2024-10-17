@@ -97,5 +97,11 @@ func main() {
 	wg.Add(1)
 	go startConsumer(4, &wg)
 
+	wg.Add(1)
+	go startConsumer(5, &wg)
+
+	wg.Add(1)
+	go startConsumer(6, &wg)
+
 	wg.Wait()
 }
